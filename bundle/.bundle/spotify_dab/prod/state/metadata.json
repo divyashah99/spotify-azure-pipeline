@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "config": {
+    "bundle": {
+      "git": {
+        "bundle_root_path": "."
+      }
+    },
+    "workspace": {
+      "file_path": "/Workspace/PROD/.bundle/spotify_dab/prod/files"
+    },
+    "resources": {},
+    "presets": {
+      "source_linked_deployment": false
+    }
+  },
+  "extra": {
+    "git_folder_path": "/Workspace/Users/shah.divyab99_gmail.com#ext#@shahdivyab99gmail.onmicrosoft.com/spotify_dab"
+  }
+}

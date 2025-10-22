@@ -1,132 +1,129 @@
 # Spotify Azure Pipeline
 
-A comprehensive data pipeline for processing Spotify streaming data using Azure Data Factory (ADF) for incremental ingestion and Databricks Asset Bundle (DAB) for data transformation and analytics.
+A comprehensive, enterprise-grade data pipeline for processing Spotify streaming data using **Azure Data Factory (ADF)** for incremental ingestion and **Databricks Asset Bundle (DAB)** for data transformation, modeling, and analytics.
+
+---
 
 ## Overview
 
-This project implements a modern data lakehouse architecture for Spotify data analytics:
+This project implements a **modern Azure Data Lakehouse architecture** that enables scalable ingestion, transformation, and analytics of Spotify-like streaming data.  
+It integrates **Azure Data Factory**, **Databricks**, and **Delta Lake** to handle incremental data loads, ensure high performance, and maintain strong data governance.
 
-- **Bronze Layer**: Raw data ingestion from Azure SQL Database to Azure Data Lake Storage (ADLS) in Parquet format
-- **Silver Layer**: Data cleansing, deduplication, and transformation using Databricks Autoloader
-- **Gold Layer**: Slowly Changing Dimensions (SCD) and analytics-ready tables using Delta Live Tables (DLT)
+### Key Features
+- **Metadata-driven ingestion** with dynamic pipeline parameterization  
+- **Incremental loading** using Change Data Capture (CDC) tracking  
+- **Schema evolution** handling for semi-structured data  
+- **Automated CI/CD** deployment using Databricks Asset Bundles  
+- **Unity Catalog** for centralized data governance  
+- **SCD Type 1 & 2** implementation for dimension management  
+- **Data quality enforcement** using DLT expectations  
 
-The pipeline handles incremental data loads with Change Data Capture (CDC) tracking to ensure efficient processing of only new or changed records.
+---
 
 ## Architecture
-
 ```
 Azure SQL Database → Azure Data Factory → Azure Data Lake (Bronze)
-                                      ↓
-Databricks Autoloader → Delta Tables (Silver)
-                                      ↓
-Delta Live Tables → SCD Tables (Gold)
+                                                ↓
+                              Databricks Autoloader → Delta Tables (Silver)
+                                                ↓
+                            Delta Live Tables → SCD + Analytics Tables (Gold)
+                                                ↓
+                                    Power BI / Analytics
 ```
+
+### Layers
+
+| Layer | Purpose | Technology |
+|-------|----------|-------------|
+| **Bronze** | Raw data ingestion | ADF, ADLS Gen2 |
+| **Silver** | Data cleansing, transformation | Databricks Autoloader, Spark |
+| **Gold** | Curated SCD dimensions and facts | Delta Live Tables, Delta Lake |
+
+---
 
 ## Components
 
 ### Azure Data Factory (ADF)
 
 #### Linked Services
-- **azure_sql**: Connection to Azure SQL Database (`azureserverdivya.database.windows.net/azureprojectdbdivya`)
-- **datalake**: Connection to Azure Data Lake Storage (`https://storageaccdivy.dfs.core.windows.net/`)
+- **azure_sql** → Azure SQL Database  
+  Example: `azureserverdivya.database.windows.net/azureprojectdbdivya`
+- **datalake** → Azure Data Lake Storage Gen2  
+  Example: `https://storageaccdivy.dfs.core.windows.net/`
 
 #### Datasets
-- **azure_sql**: References the Azure SQL table
-- **json_dynamic**: Dynamic JSON dataset for CDC tracking (container/folder/file parameters)
-- **parquet_dynamic**: Dynamic Parquet dataset for data output (container/folder/file parameters)
+- **azure_sql** → Source system tables  
+- **json_dynamic** → CDC checkpoint tracking  
+- **parquet_dynamic** → Output dataset for ingestion results  
 
-#### Pipelines
-- **incremental_ingestion**: Single-table incremental pipeline with CDC tracking
-- **incremental_loop**: Multi-table pipeline that processes multiple tables in a loop
+#### Pipeline: incremental_loop
+- Executes multi-table ingestion dynamically using `Lookup` + `ForEach`
+- Iterates through configuration file stored in ADLS or ADF variable
+- Implements CDC-based incremental logic for each table
+- Parameters: `schema`, `table`, `cdc_col`, `from_date`
+- Reads data from Azure SQL → writes to ADLS (Parquet)
+- Updates CDC JSON checkpoint after each table ingestion
+- Supports **backfill** and **replay** modes for reprocessing older data
+
+#### CDC Mechanism
+- Tracks last processed timestamp in `cdc.json` per table
+- Example:
+```json
+  { "cdc": "2025-10-19T23:45:00Z" }
+```
+- Ensures idempotent ingestion (no duplicate records)
+
+#### Monitoring & Error Handling
+- ADF Alerts integrated via Azure Monitor and Logic Apps
+- Custom email notifications for failed activities
+- Pipeline run history and CDC logs stored in `monitoring/` folder in ADLS
+
+---
 
 ### Databricks Asset Bundle (DAB)
 
-#### Silver Layer (`src/silver/`)
-- **silver_Dimensions.py**: Autoloader notebooks for transforming bronze Parquet files to silver Delta tables
-  - DimUser: Uppercase user names, drop duplicates
-  - DimArtist: Drop duplicates
-  - DimTrack: Add duration flags, clean track names
-  - DimDate: Basic transformation
-  - FactStream: Basic transformation
+#### Silver Layer — `src/silver/`
+**silver_Dimensions.py**
+- Uses Databricks Autoloader for efficient file ingestion
+- Cleanses data (deduplication, type casting, quality checks)
+- Implements schema evolution and checkpointing for reliability
+- Writes optimized Delta Tables for downstream processing
 
-#### Gold Layer (`src/gold/dlt/transformations/`)
-- **DimUser.py**: SCD Type 2 dimension with expectations (user_id not null)
-- **DimTrack.py**: SCD Type 2 dimension
-- **DimDate.py**: SCD Type 2 dimension
-- **FactStream.py**: SCD Type 1 fact table
+**Transformations**
+- **DimUser**: Cleans names, deduplicates users
+- **DimArtist**: Drops duplicates, normalizes artist names
+- **DimTrack**: Derives duration flags, removes invalid records
+- **DimDate**: Generates time-based keys for streaming events
+- **FactStream**: Calculates total plays, unique users, playtime metrics
+
+#### Gold Layer — `src/gold/dlt/transformations/`
+Implements Delta Live Tables (DLT) for curated and governed analytics data.
+
+**Files**
+- **DimUser.py**: SCD Type 2 (tracks user attribute changes over time)
+- **DimTrack.py**: SCD Type 2 (tracks track metadata changes)
+- **DimDate.py**: Static date dimension
+- **FactStream.py**: Fact table with SCD Type 1 merge for latest metrics
+
+**DLT Expectations**
+- `expect_or_fail(user_id IS NOT NULL)`
+- `expect_or_drop(duration > 0)`
+- Enforced data quality rules at load time
 
 #### Utilities
-- **transformations.py**: Reusable utility class for dropping columns
-- **jinja_notebook.py**: Dynamic SQL generation using Jinja2 templates for joins
+- **transformations.py**: Helper class for dynamic column operations
+- **jinja_notebook.py**: Generates dynamic SQL templates for DLT joins
+- **common_functions.py**: Reusable Spark UDFs and validation helpers
 
-#### Resources
-- **spotify_dab.job.yml**: Job definition with notebook task, pipeline refresh, and main Python task
-- **spotify_dab.pipeline.yml**: DLT pipeline configuration
+#### Configuration
+- **spotify_dab.job.yml**: Defines Databricks Job workflow, includes Autoloader task → Silver transformation → DLT run
+- **spotify_dab.pipeline.yml**: Configures DLT cluster, schema, tables, and refresh policies
 
-## Prerequisites
+---
 
-- Azure subscription with:
-  - Azure Data Factory
-  - Azure SQL Database
-  - Azure Data Lake Storage Gen2
-  - Databricks workspace
-- Databricks CLI installed
-- Python 3.10-3.13
-- UV package manager
+## Metadata-Driven Design
 
-## Setup and Deployment
-
-### Azure Data Factory
-
-1. **Import ADF Resources**:
-   ```bash
-   # Publish the factory configuration
-   # Use ADF UI or ARM templates to deploy linked services, datasets, and pipelines
-   ```
-
-2. **Configure Linked Services**:
-   - Update Azure SQL credentials in `linkedService/azure_sql.json`
-   - Update Data Lake connection in `linkedService/datalake.json`
-
-3. **Pipeline Parameters**:
-   - `schema`: Database schema (e.g., "dbo")
-   - `table`: Table name (e.g., "DimUser")
-   - `cdc_col`: CDC column (e.g., "updated_at")
-   - `from_date`: Optional start date for initial load
-
-### Databricks Asset Bundle
-
-1. **Install Dependencies**:
-   ```bash
-   uv sync --dev
-   ```
-
-2. **Configure Bundle**:
-   - Update `databricks.yml` with your workspace details
-   - Modify targets for dev/prod environments
-
-3. **Deploy Bundle**:
-   ```bash
-   # Deploy to development
-   databricks bundle deploy --target dev
-
-   # Deploy to production
-   databricks bundle deploy --target prod
-   ```
-
-## Usage
-
-### Running ADF Pipelines
-
-#### Single Table Ingestion
-Trigger the `incremental_ingestion` pipeline with parameters:
-- schema: "dbo"
-- table: "DimUser"
-- cdc_col: "updated_at"
-- from_date: "" (empty for incremental)
-
-#### Multi-Table Ingestion
-The `incremental_loop` pipeline processes multiple tables defined in the `loop_input` parameter:
+A central configuration file drives the ingestion logic dynamically:
 ```json
 [
   {
@@ -144,76 +141,172 @@ The `incremental_loop` pipeline processes multiple tables defined in the `loop_i
 ]
 ```
 
-### Running Databricks Jobs
+This eliminates hardcoding and makes pipelines reusable across multiple tables.
 
+---
+
+## Prerequisites
+
+- **Azure Subscription** with:
+  - Data Factory
+  - Data Lake Storage Gen2
+  - Azure SQL Database
+  - Databricks workspace
+- **Python 3.10+**
+- **Databricks CLI**
+- **UV Package Manager**
+- **GitHub** (for CI/CD integration)
+
+---
+
+## Setup and Deployment
+
+### Azure Data Factory
+
+#### Deploy Linked Services
 ```bash
-# Run the bundle job
-databricks bundle run
-
-# Run specific job
-databricks bundle run spotify_dab_job
+az datafactory linked-service create --resource-group rg --factory-name spotify-adf --name azure_sql --properties azure_sql.json
 ```
 
-## Data Flow
+#### Configure Pipeline Parameters
+Example:
+```json
+{
+  "schema": "dbo",
+  "table": "DimUser",
+  "cdc_col": "updated_at"
+}
+```
 
-1. **Ingestion (ADF)**:
-   - Query Azure SQL for records where CDC column > last processed value
-   - Write to ADLS bronze layer in Parquet format
-   - Update CDC tracking file
+#### Publish Factory
+Use ADF Studio or ARM templates to publish pipelines.
 
-2. **Silver Transformation (Databricks)**:
-   - Autoloader reads bronze Parquet files
-   - Applies cleansing rules (deduplication, data quality)
-   - Writes to Delta tables in silver layer
+---
 
-3. **Gold Analytics (DLT)**:
-   - Reads from silver Delta tables
-   - Applies SCD logic for dimensions
-   - Creates analytics-ready tables
+### Databricks Asset Bundle
 
-## CDC Mechanism
+#### Install Dependencies
+```bash
+uv sync --dev
+```
 
-The pipeline uses JSON files in the bronze layer to track the last processed CDC value:
+#### Configure Bundle
+Update `databricks.yml`:
+```yaml
+workspace:
+  host: https://adb-xxxxxxxxx.azuredatabricks.net
+targets:
+  dev:
+    default_cluster:
+      node_type_id: Standard_DS3_v2
+      num_workers: 2
+  prod:
+    default_cluster:
+      node_type_id: Standard_DS3_v2
+      num_workers: 4
+```
 
-- File: `{table}_cdc/cdc.json`
-- Contains: `{"cdc": "last_processed_value"}`
+#### Deploy
+```bash
+databricks bundle deploy --target dev
+databricks bundle deploy --target prod
+```
 
-For initial loads, set `from_date` parameter or leave empty to process all data.
+---
+
+## CI/CD and Automation
+
+- Uses **GitHub Actions** for automatic deployment to Databricks
+- Supports multi-environment workflows (dev, staging, prod)
+- Bundles manage all dependencies and job configurations
+- Version-controlled via GitHub with branch protection and review gates
+
+**Example CI/CD Workflow** (`.github/workflows/deploy.yml`):
+```yaml
+on: [push]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync dependencies
+        run: uv sync --dev
+      - name: Deploy to Databricks
+        run: databricks bundle deploy --target dev
+```
+
+---
+
+## Security and Governance
+
+- **Managed Identity** used for secure ADF-to-ADLS and ADF-to-SQL authentication
+- **Unity Catalog** manages permissions and table lineage across layers
+- Secrets stored in **Azure Key Vault** and referenced in Databricks via `secrets.get()`
+- Data encryption at rest (ADLS) and in transit (HTTPS)
+
+---
 
 ## Monitoring and Logging
 
-- ADF: Monitor pipeline runs in ADF UI
-- Databricks: Monitor jobs and DLT pipelines in Databricks workspace
-- Logs: Check Databricks driver logs for transformation details
+| Component | Monitoring Tool | Description |
+|-----------|----------------|-------------|
+| **ADF** | Azure Monitor | Pipeline run status, alerts |
+| **Databricks** | Job UI, Driver Logs | Job-level logs, DLT run metrics |
+| **DLT** | Data Quality UI | Rule compliance and failed records |
+| **ADLS** | Storage Insights | File size, ingestion health |
 
-## Development
+---
 
-### Local Development
+## Data Modeling
+
+### Fact Table: FactStream
+
+| Column | Type | Description |
+|--------|------|-------------|
+| stream_id | INT | Unique stream identifier |
+| user_id | INT | Listener ID |
+| track_id | INT | Song reference |
+| timestamp | DATETIME | Stream event time |
+| duration | FLOAT | Playback duration (sec) |
+| device | STRING | Streaming device type |
+
+### Dimension Tables
+
+- **DimUser**: User attributes (country, age group)
+- **DimArtist**: Artist metadata
+- **DimTrack**: Track-level data (genre, popularity)
+- **DimDate**: Date attributes (week, month, year)
+
+---
+
+## Local Development
 ```bash
-# Install dev dependencies
 uv sync --dev
-
-# Run tests
-uv run pytest
-
-# Use databricks-connect for local testing
+pytest tests/
+databricks bundle run spotify_dab_job
 ```
 
-### Adding New Tables
-1. Add table configuration to `incremental_loop` pipeline parameters
-2. Create silver transformation logic in `silver_Dimensions.py`
-3. Create gold DLT transformation in `src/gold/dlt/transformations/`
+---
 
-## Security
+## Performance Optimization
 
-- Azure SQL credentials are encrypted in linked service
-- Data Lake access uses managed identity or service principal
-- Databricks workspace access controlled via permissions
+- **Autoloader** for incremental data discovery
+- **Z-Ordering** and `OPTIMIZE` commands on Delta Tables
+- File compaction for small file management
+- Partition pruning for query performance
+- Cluster autoscaling based on job load
+
+---
 
 ## Contributing
 
-1. Follow the existing code structure
-2. Add tests for new transformations
-3. Update documentation for changes
-4. Deploy to dev environment for testing
+- Follow the project's modular folder structure
+- Add unit tests for new transformations
+- Document all schema changes in `/docs/data_dictionary.md`
+- Use pull requests for all changes to `main`
 
+---
+
+## License
+
+This project is licensed under the **MIT License** — free for educational and commercial use.
